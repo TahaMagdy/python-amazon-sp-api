@@ -3,7 +3,6 @@ import json
 from datetime import datetime
 import logging
 import os
-from json import JSONDecodeError
 
 import boto3
 from cachetools import TTLCache
@@ -15,7 +14,6 @@ from .base_client import BaseClient
 from .exceptions import get_exception_for_code, MissingScopeException
 from .marketplaces import Marketplaces
 from sp_api.base import AWSSigV4
-from sp_api.base.credential_provider import CredentialProvider
 
 log = logging.getLogger(__name__)
 
@@ -28,14 +26,14 @@ class Client(BaseClient):
 
     def __init__(
             self,
-            marketplace: Marketplaces = Marketplaces[os.environ.get('SP_API_DEFAULT_MARKETPLACE', Marketplaces.US.name)],
+            marketplace: Marketplaces = Marketplaces[os.environ['SP_API_DEFAULT_MARKETPLACE']] if 'SP_API_DEFAULT_MARKETPLACE' in os.environ else Marketplaces.UK,
             *,
             refresh_token=None,
             account='default',
             credentials=None,
             restricted_data_token=None
     ):
-        self.credentials = CredentialProvider(account, credentials).credentials
+        super().__init__(account, credentials)
         self.boto3_client = boto3.client(
             'sts',
             aws_access_key_id=self.credentials.aws_access_key,
@@ -45,7 +43,7 @@ class Client(BaseClient):
         self.marketplace_id = marketplace.marketplace_id
         self.region = marketplace.region
         self.restricted_data_token = restricted_data_token
-        self._auth = AccessTokenClient(refresh_token=refresh_token, credentials=self.credentials)
+        self._auth = AccessTokenClient(refresh_token=refresh_token, account=account, credentials=credentials)
 
     def _get_cache_key(self, token_flavor=''):
         return 'role_' + hashlib.md5(
@@ -53,6 +51,7 @@ class Client(BaseClient):
         ).hexdigest()
 
     def set_role(self, cache_key='role'):
+
         role = self.boto3_client.assume_role(
             RoleArn=self.credentials.role_arn,
             RoleSessionName='guid'
@@ -83,6 +82,7 @@ class Client(BaseClient):
     @property
     def role(self):
         cache_key = self._get_cache_key()
+
         try:
             role = role_cache[cache_key]
         except KeyError:
@@ -117,21 +117,15 @@ class Client(BaseClient):
         if add_marketplace:
             self._add_marketplaces(data if self.method in ('POST', 'PUT') else params)
 
-        res = request(self.method, self.endpoint + path,
-                      params=params,
-                      data=json.dumps(data) if data and self.method in ('POST', 'PUT', 'PATCH') else None,
-                      headers=headers or self.headers,
+        res = request(self.method, self.endpoint + path, params=params,
+                      data=json.dumps(data) if data and self.method in ('POST', 'PUT', 'PATCH') else None, headers=headers or self.headers,
                       auth=self._sign_request())
+
         return self._check_response(res)
 
-    def _check_response(self, res) -> ApiResponse:
-        if self.method == 'DELETE' and 200 <= res.status_code < 300:
-            try:
-                js = res.json() or {}
-            except JSONDecodeError:
-                js = {'status_code': res.status_code}
-        else:
-            js = res.json() or {}
+    @staticmethod
+    def _check_response(res) -> ApiResponse:
+        js = res.json() or {}
         if isinstance(js, list):
             js = js[0]
         error = js.get('errors', None)
